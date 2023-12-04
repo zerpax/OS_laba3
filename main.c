@@ -1,3 +1,4 @@
+#include "sys/wait.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -8,12 +9,6 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
-#include "sys/wait.h"
-
-
-#define OKTOWRITE "condwrite"
-#define MESSAGE "msg"
-#define MUTEX "mutex_lock"
 
 int main(int argc, char **argv) {
 
@@ -21,9 +16,9 @@ int main(int argc, char **argv) {
   pthread_mutex_t *mutex;
   char *message;
   int des_cond, des_msg, des_mutex;
-  int mode = S_IRWXU | S_IRWXG;
 
-  des_mutex = shm_open(MUTEX, O_CREAT | O_RDWR | O_TRUNC, mode);
+  des_mutex =
+      shm_open("mutex_lock", O_CREAT | O_RDWR | O_TRUNC, S_IRWXU | S_IRWXG);
 
   if (des_mutex < 0) {
     perror("failure on shm_open on des_mutex");
@@ -44,7 +39,8 @@ int main(int argc, char **argv) {
     exit(1);
   }
 
-  des_cond = shm_open(OKTOWRITE, O_CREAT | O_RDWR | O_TRUNC, mode);
+  des_cond =
+      shm_open("condwrite", O_CREAT | O_RDWR | O_TRUNC, S_IRWXU | S_IRWXG);
 
   if (des_cond < 0) {
     perror("failure on shm_open on des_cond");
@@ -65,39 +61,57 @@ int main(int argc, char **argv) {
     exit(1);
   }
 
-  /* HERE WE GO */
-  /**************************************/
-
-  /* set mutex shared between processes */
   pthread_mutexattr_t mutexAttr;
   pthread_mutexattr_setpshared(&mutexAttr, PTHREAD_PROCESS_SHARED);
   pthread_mutex_init(mutex, &mutexAttr);
 
-  /* set condition shared between processes */
   pthread_condattr_t condAttr;
   pthread_condattr_setpshared(&condAttr, PTHREAD_PROCESS_SHARED);
   pthread_cond_init(condition, &condAttr);
 
-  /*************************************/
-
+  int shared_filename_fd =
+      shm_open("shared_filename", O_CREAT | O_RDWR, S_IRWXU);
   int shared_num_fd = shm_open("shared_num", O_CREAT | O_RDWR, S_IRWXU);
   int shared_state_fd = shm_open("shared_char", O_CREAT | O_RDWR, S_IRWXU);
-  posix_fallocate(shared_num_fd, 0, sizeof(int));
-  posix_fallocate(shared_state_fd, 0, sizeof(int));
+  if (ftruncate(shared_filename_fd, sizeof(int)) == -1) {
+    perror("Error on ftruncate to sizeof shared_filename_fd\n");
+    exit(-1);
+  }
+  if (ftruncate(shared_num_fd, sizeof(int)) == -1) {
+    perror("Error on ftruncate to sizeof shared_num_fd\n");
+    exit(-1);
+  };
+  if (ftruncate(shared_state_fd, sizeof(int)) == -1) {
+    perror("Error on ftruncate to sizeof shared_state_fd\n");
+    exit(-1);
+  };
 
+  char *shared_filename = mmap(NULL, sizeof(char) * 100, PROT_READ | PROT_WRITE,
+                               MAP_SHARED, shared_filename_fd, 0);
   int *shared_num = mmap(NULL, sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED,
                          shared_num_fd, 0);
   int *shared_state = mmap(NULL, sizeof(int), PROT_READ | PROT_WRITE,
                            MAP_SHARED, shared_state_fd, 0);
   *shared_state = 1;
+  shared_filename[0] = 0;
 
   pid_t pid = fork();
-  if (pid == 0) {
 
+  if (pid == -1) {
+    perror("Error on fork\n");
+    exit(0);
+  }
+
+  if (pid == 0) {
     int sum = 0;
 
-    int output = open("fff", O_CREAT | O_WRONLY, S_IRWXU);
+    while (shared_filename[0] == 0) {
+      pthread_mutex_lock(mutex);
+      pthread_cond_wait(condition, mutex);
+      pthread_mutex_unlock(mutex);
+    }
 
+    int output = open(shared_filename, O_CREAT | O_WRONLY, S_IRWXU);
     while (*shared_state != 0) {
       pthread_mutex_lock(mutex);
       if (*shared_state == 2) {
@@ -117,10 +131,17 @@ int main(int argc, char **argv) {
     }
     close(output);
 
-    
+    int a = open(shared_filename, O_RDONLY, S_IRWXU);
+
+    read(output, &sum, sizeof(sum));
+    printf("%d\n", sum);
+    close(output);
   }
 
   else {
+
+    scanf("%100s", shared_filename);
+    pthread_cond_signal(condition);
     char c = ' ';
     while (scanf("%d", shared_num) && (c == ' ' || c == '\n')) {
       c = getchar();
@@ -140,12 +161,8 @@ int main(int argc, char **argv) {
     pthread_mutex_destroy(mutex);
     pthread_cond_destroy(condition);
 
-    shm_unlink(OKTOWRITE);
-    shm_unlink(MESSAGE);
-    shm_unlink(MUTEX);
-
-     wait(NULL);
-}
+    wait(NULL);
+  }
 
   return 0;
 }
